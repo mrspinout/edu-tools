@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Kinematik Übungs-App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background-color: #f8fafc;
+            color: #334155;
+            touch-action: none; /* Verhindert Scrollen auf den Canvas-Elementen beim Wischen */
+        }
+        .canvas-container {
+            width: 100%;
+            background: white;
+            border: 1px solid #cbd5e1;
+            border-radius: 0.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .diagram-title {
+            background-color: #f1f5f9;
+            padding: 0.5rem 1rem;
+            border-bottom: 1px solid #e2e8f0;
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: #475569;
+            display: flex;
+            justify-content: space-between;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            cursor: crosshair;
+            background-color: white;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 max-w-4xl mx-auto">
+
+    <header class="mb-8">
+        <h1 class="text-3xl font-bold text-slate-800 mb-2">Kinematik Graphen-Trainer</h1>
+        <p class="text-slate-600 mb-6">Lies die Situation, zeichne die drei Graphen skizzenhaft ein und kontrolliere deine Lösung. Alle Werte ($t, a, v, s$) sind exakte Ganzzahlen.</p>
+        
+        <div class="flex flex-wrap gap-3 mb-6">
+            <button id="btn-new" class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-5 rounded-md transition-colors shadow-sm">
+                Neue Aufgabe
+            </button>
+            <button id="btn-clear" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium py-2 px-5 rounded-md transition-colors shadow-sm">
+                Zeichnung löschen
+            </button>
+            <button id="btn-solution" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 px-5 rounded-md transition-colors shadow-sm">
+                Lösung anzeigen
+            </button>
+        </div>
+
+        <div class="bg-white p-5 rounded-lg border border-slate-200 shadow-sm">
+            <h2 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Situation</h2>
+            <p id="scenario-text" class="text-lg text-slate-800 leading-relaxed font-medium">Klicke auf "Neue Aufgabe", um zu beginnen.</p>
+        </div>
+    </header>
+
+    <main class="space-y-6">
+        <div class="canvas-container">
+            <div class="diagram-title"><span>t-a Diagramm</span><span class="text-slate-400 font-normal">a in m/s²</span></div>
+            <canvas id="canvas-a" height="250"></canvas>
+        </div>
+        <div class="canvas-container">
+            <div class="diagram-title"><span>t-v Diagramm</span><span class="text-slate-400 font-normal">v in m/s</span></div>
+            <canvas id="canvas-v" height="250"></canvas>
+        </div>
+        <div class="canvas-container">
+            <div class="diagram-title"><span>t-s Diagramm</span><span class="text-slate-400 font-normal">s in m</span></div>
+            <canvas id="canvas-s" height="250"></canvas>
+        </div>
+    </main>
+
+<script>
+    // App State
+    let state = {
+        phases: [],
+        maxT: 0,
+        niceBounds: { t: null, a: null, v: null, s: null },
+        showSolution: false,
+        userPaths: { a: [], v: [], s: [] },
+        currentStroke: null
+    };
+
+    // Canvas Layout Settings
+    const layout = { ml: 60, mr: 30, mt: 30, mb: 35 }; // Margins for axis text & reserve lines
+    const CANVAS_HEIGHT = 250;
+
+    const canvases = {
+        a: document.getElementById('canvas-a'),
+        v: document.getElementById('canvas-v'),
+        s: document.getElementById('canvas-s')
+    };
+    const contexts = {
+        a: canvases.a.getContext('2d'),
+        v: canvases.v.getContext('2d'),
+        s: canvases.s.getContext('2d')
+    };
+
+    function resizeCanvases() {
+        const width = canvases.a.parentElement.clientWidth;
+        for (let key in canvases) {
+            const c = canvases[key];
+            c.width = width * window.devicePixelRatio;
+            c.height = CANVAS_HEIGHT * window.devicePixelRatio;
+            c.style.width = width + 'px';
+            c.style.height = CANVAS_HEIGHT + 'px';
+            contexts[key].scale(window.devicePixelRatio, window.devicePixelRatio);
+        }
+        drawAll();
+    }
+    window.addEventListener('resize', resizeCanvases);
+
+    // "Nice Numbers" Algorithm (Forces integers, adds 1-2 units reserve padding)
+    function calcNiceBounds(min, max, maxTicks, isYAxis = true, key = '') {
+        let range = max - min;
+        if (range === 0) {
+            if (max === 0) { min = -1; max = 1; range = 2; }
+            else { min = 0; max = max * 2; range = max; }
+        }
+        
+        const roughStep = range / (maxTicks - 1);
+        const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep || 1)));
+        const normalizedStep = roughStep / magnitude;
+        
+        let niceStep;
+        if (normalizedStep <= 1.5) niceStep = 1;
+        else if (normalizedStep <= 3) niceStep = 2;
+        else if (normalizedStep <= 7) niceStep = 5;
+        else niceStep = 10;
+        
+        let step = Math.max(1, Math.round(niceStep * magnitude)); // Strict integers >= 1
+        
+        let niceMin = Math.floor(min / step) * step;
+        let niceMax = Math.ceil(max / step) * step;
+        
+        if (isYAxis) {
+            niceMin -= step; // Reserve below
+            niceMax += step; // Reserve above
+            // If min was 0, allow it to drop below 0 by 1 step for margin, 
+            // unless it's the a graph where we just want visual space
+            if (min === 0 && key !== 'a') niceMin = 0 - step; 
+        } else {
+            niceMin = 0; // Time always starts at 0
+            niceMax += step; // Reserve right
+        }
+        
+        return { min: niceMin, max: niceMax, step: step };
+    }
+
+    // --- Scenario Generation Logic (Physically realistic & strict integers) ---
+    const entities = [
+        { name: "Ein Auto", maxA: 4 },
+        { name: "Ein Lieferwagen", maxA: 3 },
+        { name: "Ein FTS (Fahrerloses Transportsystem)", maxA: 1 },
+        { name: "Ein Lift", maxA: 1 },
+        { name: "Ein voll beladener Güterzug", maxA: 1 }
+    ];
+
+    // Get an acceleration phase that guarantees integer 's' (if a is odd, t must be even)
+    function getValidAccelPhase(maxA) {
+        let options = [];
+        for (let a = 1; a <= maxA; a++) {
+            for (let t = 2; t <= 8; t++) {
+                if (a % 2 === 0 || t % 2 === 0) {
+                    options.push({ a: a, t: t, v: a * t });
+                }
+            }
+        }
+        return options[Math.floor(Math.random() * options.length)];
+    }
+
+    // Get braking factors to exactly reduce velocity by 'vDrop'
+    function getValidBrakeFactors(vDrop, maxA) {
+        let valid = [];
+        for (let a = 1; a <= maxA; a++) {
+            if (vDrop % a === 0) {
+                let t = vDrop / a;
+                // rule for integer distance: 'a' even OR 't' even
+                if (a % 2 === 0 || t % 2 === 0) {
+                    valid.push({ a: -a, t: t });
+                }
+            }
+        }
+        return valid;
+    }
+
+    function generateScenario() {
+        const entity = entities[Math.floor(Math.random() * entities.length)];
+        let type = Math.floor(Math.random() * 3);
+        let phases = [];
+        let text = "";
+
+        if (type === 0) {
+            // Type 0: Accelerate -> Hold -> Brake to 0
+            let p1, p3Opts;
+            do {
+                p1 = getValidAccelPhase(entity.maxA);
+                p3Opts = getValidBrakeFactors(p1.v, entity.maxA);
+            } while (p3Opts.length === 0);
+            
+            let p3 = p3Opts[Math.floor(Math.random() * p3Opts.length)];
+            let t2 = Math.floor(Math.random() * 4 + 2); // Hold for 2-5s
+
+            phases = [
+                { t: p1.t, a: p1.a },
+                { t: t2, a: 0 },
+                { t: p3.t, a: p3.a }
+            ];
+            text = `${entity.name} beschleunigt aus dem Stillstand für ${p1.t} s mit ${p1.a} m/s². Danach fährt es für ${t2} s mit konstanter Geschwindigkeit weiter. Schliesslich bremst es mit ${Math.abs(p3.a)} m/s² exakt bis zum Stillstand ab.`;
+            
+        } else if (type === 1) {
+            // Type 1: Drive const -> Brake (not to 0) -> Drive const
+            let v0, p2Opts, drop;
+            do {
+                v0 = [4, 6, 8, 10, 12][Math.floor(Math.random() * 5)];
+                let possibleDrops = [2, 4, 6, 8, 10].filter(d => d <= v0);
+                drop = possibleDrops[Math.floor(Math.random() * possibleDrops.length)];
+                p2Opts = getValidBrakeFactors(drop, entity.maxA);
+            } while (p2Opts.length === 0);
+
+            let p2 = p2Opts[Math.floor(Math.random() * p2Opts.length)];
+            let t1 = Math.floor(Math.random() * 4 + 2);
+            let t3 = Math.floor(Math.random() * 4 + 2);
+
+            phases = [
+                { t: 0, a: 0, v0: v0 }, // Init phase
+                { t: t1, a: 0 },
+                { t: p2.t, a: p2.a },
+                { t: t3, a: 0 }
+            ];
+            
+            if (drop === v0) {
+                text = `${entity.name} fährt zunächst mit konstanten ${v0} m/s für ${t1} s. Dann bremst es für ${p2.t} s mit ${Math.abs(p2.a)} m/s² bis zum Stillstand ab. Es bleibt danach für ${t3} s stehen.`;
+            } else {
+                text = `${entity.name} fährt zunächst mit konstanten ${v0} m/s für ${t1} s. Dann bremst es für ${p2.t} s mit ${Math.abs(p2.a)} m/s² ab. Die verbleibende Restgeschwindigkeit wird danach für weitere ${t3} s beibehalten.`;
+            }
+            
+        } else {
+            // Type 2: Accelerate -> Brake instantly (not to 0) -> Hold
+            let p1, p2Opts, drop;
+            do {
+                p1 = getValidAccelPhase(entity.maxA);
+                let possibleDrops = [2, 4, 6, 8].filter(d => d < p1.v);
+                if (possibleDrops.length === 0) continue;
+                drop = possibleDrops[Math.floor(Math.random() * possibleDrops.length)];
+                p2Opts = getValidBrakeFactors(drop, entity.maxA);
+            } while (!p2Opts || p2Opts.length === 0);
+
+            let p2 = p2Opts[Math.floor(Math.random() * p2Opts.length)];
+            let t3 = Math.floor(Math.random() * 4 + 2);
+
+            phases = [
+                { t: p1.t, a: p1.a },
+                { t: p2.t, a: p2.a },
+                { t: t3, a: 0 }
+            ];
+            text = `${entity.name} startet aus dem Stillstand und beschleunigt für ${p1.t} s mit ${p1.a} m/s². Danach wird sofort leicht abgebremst: für ${p2.t} s mit ${Math.abs(p2.a)} m/s² Verzögerung. Die danach noch vorhandene Geschwindigkeit wird für ${t3} s gehalten.`;
+        }
+
+        document.getElementById('scenario-text').textContent = text;
+        calculatePhysics(phases);
+        
+        state.showSolution = false;
+        state.userPaths = { a: [], v: [], s: [] };
+        
+        const btnSol = document.getElementById('btn-solution');
+        btnSol.textContent = "Lösung anzeigen";
+        btnSol.classList.replace('bg-rose-600', 'bg-emerald-600');
+        btnSol.classList.replace('hover:bg-rose-700', 'hover:bg-emerald-700');
+
+        drawAll();
+    }
+
+    function calculatePhysics(rawPhases) {
+        let t = 0, v = 0, s = 0;
+        let pData = [];
+        let maxA=0, minA=0, maxV=0, minV=0, maxS=0, minS=0;
+
+        if(rawPhases[0] && rawPhases[0].v0 !== undefined) {
+            v = rawPhases[0].v0;
+            maxV = v; minV = v;
+            rawPhases.shift();
+        }
+
+        rawPhases.forEach(p => {
+            if (p.t <= 0) return;
+            const tStart = t;
+            const vStart = v;
+            const sStart = s;
+            
+            t += p.t;
+            s += v * p.t + 0.5 * p.a * p.t * p.t;
+            v += p.a * p.t;
+            
+            pData.push({ tStart, tEnd: t, a: p.a, vStart, vEnd: v, sStart, sEnd: s });
+
+            maxA = Math.max(maxA, p.a); minA = Math.min(minA, p.a);
+            maxV = Math.max(maxV, vStart, v); minV = Math.min(minV, vStart, v);
+            maxS = Math.max(maxS, sStart, s); minS = Math.min(minS, sStart, s);
+        });
+
+        state.phases = pData;
+        state.maxT = t;
+        
+        // Calculate nice integer grid steps (with guaranteed reserve margins)
+        state.niceBounds.t = calcNiceBounds(0, Math.max(t, 1), 8, false, 't');
+        state.niceBounds.a = calcNiceBounds(minA, maxA, 5, true, 'a');
+        state.niceBounds.v = calcNiceBounds(minV, maxV, 6, true, 'v');
+        state.niceBounds.s = calcNiceBounds(minS, maxS, 6, true, 's');
+    }
+
+    // Mapping Functions
+    function mapX(t, w) { 
+        const cw = w - layout.ml - layout.mr;
+        return layout.ml + (t / state.niceBounds.t.max) * cw; 
+    }
+    
+    function mapY(val, bounds) {
+        const ch = CANVAS_HEIGHT - layout.mt - layout.mb;
+        const range = bounds.max - bounds.min;
+        return layout.mt + ch - ((val - bounds.min) / range) * ch;
+    }
+    
+    function unmapX(px, w) { 
+        const cw = w - layout.ml - layout.mr;
+        let t = ((px - layout.ml) / cw) * state.niceBounds.t.max;
+        return Math.max(0, Math.min(t, state.niceBounds.t.max));
+    }
+    
+    function unmapY(py, bounds) {
+        const ch = CANVAS_HEIGHT - layout.mt - layout.mb;
+        const range = bounds.max - bounds.min;
+        let val = bounds.min + ((layout.mt + ch - py) / ch) * range;
+        return Math.max(bounds.min, Math.min(val, bounds.max));
+    }
+
+    // Drawing Logic
+    function drawGrid(ctx, w, boundsY) {
+        ctx.clearRect(0, 0, w, CANVAS_HEIGHT);
+        ctx.font = '12px Inter';
+        ctx.fillStyle = '#64748b';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+
+        // Horizontal grid & Y labels
+        ctx.beginPath();
+        for (let yVal = boundsY.min; yVal <= boundsY.max + 0.001; yVal += boundsY.step) {
+            const yPx = mapY(yVal, boundsY);
+            ctx.moveTo(layout.ml, yPx);
+            ctx.lineTo(w - layout.mr, yPx);
+            ctx.fillText(yVal.toString(), layout.ml - 10, yPx);
+        }
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Vertical grid & X labels
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.beginPath();
+        const boundsT = state.niceBounds.t;
+        for (let tVal = boundsT.min; tVal <= boundsT.max + 0.001; tVal += boundsT.step) {
+            const xPx = mapX(tVal, w);
+            ctx.moveTo(xPx, layout.mt);
+            ctx.lineTo(xPx, CANVAS_HEIGHT - layout.mb);
+            ctx.fillText(tVal.toString(), xPx, CANVAS_HEIGHT - layout.mb + 10);
+        }
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.stroke();
+
+        // Highlight Axes (Zero lines)
+        ctx.beginPath();
+        const zeroY = mapY(0, boundsY);
+        ctx.moveTo(layout.ml, zeroY); ctx.lineTo(w - layout.mr, zeroY); // t-Axis
+        const zeroX = mapX(0, w);
+        ctx.moveTo(zeroX, layout.mt); ctx.lineTo(zeroX, CANVAS_HEIGHT - layout.mb); // Y-Axis
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+
+    function drawSolution(ctx, type, w, boundsY) {
+        if (!state.showSolution || state.phases.length === 0) return;
+
+        ctx.strokeStyle = '#ef4444'; // Red for exact solution
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+
+        if (type === 'a') {
+            state.phases.forEach((p, i) => {
+                const x1 = mapX(p.tStart, w);
+                const x2 = mapX(p.tEnd, w);
+                const y = mapY(p.a, boundsY);
+                if (i === 0) ctx.moveTo(x1, y);
+                else ctx.lineTo(x1, y);
+                ctx.lineTo(x2, y);
+            });
+        } else if (type === 'v') {
+            state.phases.forEach((p, i) => {
+                const x1 = mapX(p.tStart, w);
+                const x2 = mapX(p.tEnd, w);
+                const y1 = mapY(p.vStart, boundsY);
+                const y2 = mapY(p.vEnd, boundsY);
+                if (i === 0) ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+            });
+        } else if (type === 's') {
+            ctx.moveTo(mapX(0, w), mapY(0, boundsY));
+            state.phases.forEach(p => {
+                const steps = 20; 
+                for (let i = 1; i <= steps; i++) {
+                    const dt = (p.tEnd - p.tStart) * (i / steps);
+                    const currentT = p.tStart + dt;
+                    const currentS = p.sStart + p.vStart * dt + 0.5 * p.a * dt * dt;
+                    ctx.lineTo(mapX(currentT, w), mapY(currentS, boundsY));
+                }
+            });
+        }
+        ctx.stroke();
+
+        // Phase vertical dotted markers
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        state.phases.forEach(p => {
+            const x = mapX(p.tEnd, w);
+            ctx.moveTo(x, layout.mt);
+            ctx.lineTo(x, CANVAS_HEIGHT - layout.mb);
+        });
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.3;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1.0;
+    }
+
+    function drawUserPaths(ctx, type, w, boundsY) {
+        ctx.strokeStyle = '#3b82f6'; // Blue for sketch
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        state.userPaths[type].forEach(stroke => {
+            if (stroke.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(mapX(stroke[0].t, w), mapY(stroke[0].val, boundsY));
+            for (let i = 1; i < stroke.length; i++) {
+                ctx.lineTo(mapX(stroke[i].t, w), mapY(stroke[i].val, boundsY));
+            }
+            ctx.stroke();
+        });
+    }
+
+    function drawAll() {
+        if (!state.niceBounds.t) return;
+        
+        for (let key in canvases) {
+            const c = canvases[key];
+            const w = c.clientWidth;
+            const ctx = contexts[key];
+            const boundsY = state.niceBounds[key];
+
+            drawGrid(ctx, w, boundsY);
+            drawUserPaths(ctx, key, w, boundsY);
+            drawSolution(ctx, key, w, boundsY);
+        }
+    }
+
+    // Interactive Drawing Handlers
+    function setupDrawing(key) {
+        const c = canvases[key];
+        
+        const getPointerPos = (e) => {
+            const rect = c.getBoundingClientRect();
+            return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
+
+        const onDown = (e) => {
+            if (!state.niceBounds.t) return;
+            c.setPointerCapture(e.pointerId);
+            const pos = getPointerPos(e);
+            
+            if(pos.x < layout.ml || pos.x > c.clientWidth - layout.mr || 
+               pos.y < layout.mt || pos.y > CANVAS_HEIGHT - layout.mb) return;
+
+            const t = unmapX(pos.x, c.clientWidth);
+            const val = unmapY(pos.y, state.niceBounds[key]);
+            
+            state.currentStroke = [{t, val}];
+            state.userPaths[key].push(state.currentStroke);
+        };
+
+        const onMove = (e) => {
+            if (!state.currentStroke) return;
+            const pos = getPointerPos(e);
+            const t = unmapX(pos.x, c.clientWidth);
+            const val = unmapY(pos.y, state.niceBounds[key]);
+            state.currentStroke.push({t, val});
+            drawAll();
+        };
+
+        const onUp = (e) => {
+            state.currentStroke = null;
+            c.releasePointerCapture(e.pointerId);
+        };
+
+        c.addEventListener('pointerdown', onDown);
+        c.addEventListener('pointermove', onMove);
+        c.addEventListener('pointerup', onUp);
+        c.addEventListener('pointercancel', onUp);
+    }
+
+    setupDrawing('a');
+    setupDrawing('v');
+    setupDrawing('s');
+
+    // UI Buttons
+    document.getElementById('btn-new').addEventListener('click', generateScenario);
+    
+    document.getElementById('btn-clear').addEventListener('click', () => {
+        state.userPaths = { a: [], v: [], s: [] };
+        drawAll();
+    });
+
+    document.getElementById('btn-solution').addEventListener('click', (e) => {
+        if (!state.niceBounds.t) return;
+        state.showSolution = !state.showSolution;
+        
+        const btn = e.target;
+        if (state.showSolution) {
+            btn.textContent = "Lösung ausblenden";
+            btn.classList.replace('bg-emerald-600', 'bg-rose-600');
+            btn.classList.replace('hover:bg-emerald-700', 'hover:bg-rose-700');
+        } else {
+            btn.textContent = "Lösung anzeigen";
+            btn.classList.replace('bg-rose-600', 'bg-emerald-600');
+            btn.classList.replace('hover:bg-rose-700', 'hover:bg-emerald-700');
+        }
+        drawAll();
+    });
+
+    // Boot Up
+    resizeCanvases();
+    generateScenario();
+
+</script>
+</body>
+</html>
